@@ -3,3 +3,6 @@ google-generativeai
 python-dotenv
 PyMuPDF
 Pillow
+streamlit-audiorecorder
+SpeechRecognition
+pydub
