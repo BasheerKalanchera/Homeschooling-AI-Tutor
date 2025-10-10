@@ -80,8 +80,6 @@ def get_config(key_name: str, default_value=None):
 
 def handle_prompt(prompt, model, api_key, lesson_context, persona_text):
     """Appends prompt to history, gets a response, and handles streaming to the UI."""
-    st.session_state.audio_recorder_bytes = None
-
     if not api_key or not model:
         st.warning("AI model is not ready. Please check your API key in the sidebar.")
         st.stop()
@@ -111,54 +109,53 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text):
     except Exception as e:
         st.error(f"An error occurred: {e}")
 
-def process_voice_input(model, api_key, lesson_context, persona_text):
-    """Checks for new audio, transcribes it, and stores it in session state."""
-    audio_bytes = st.session_state.get("audio_recorder_bytes")
-    if audio_bytes and audio_bytes != st.session_state.get("last_audio_bytes"):
-        st.session_state.last_audio_bytes = audio_bytes
-        try:
-            with st.spinner("Transcribing..."):
-                r = sr.Recognizer()
-                byte_io = io.BytesIO(audio_bytes)
-                audio = AudioSegment.from_file(byte_io)
-                wav_buffer = io.BytesIO()
-                audio.export(wav_buffer, format="wav")
-                wav_buffer.seek(0)
-                with sr.AudioFile(wav_buffer) as source:
-                    audio_data = r.record(source)
-                
-                language_code = SUPPORTED_LANGUAGES[st.session_state.selected_language]
-                transcribed_prompt = r.recognize_google(audio_data, language=language_code)
-                
-                # Store the transcribed text in session state to be processed
-                st.session_state.text_input = transcribed_prompt
-                st.session_state.audio_recorder_bytes = None
-                st.rerun()
-
-        except Exception as e:
-            st.error(f"An error occurred during audio processing: {e}")
-            st.session_state.audio_recorder_bytes = None
+def process_voice_input(audio_segment):
+    """Transcribes a pydub AudioSegment object to text and returns the text."""
+    if not audio_segment:
+        return None
+    try:
+        with st.spinner("Transcribing..."):
+            r = sr.Recognizer()
+            
+            # Export the AudioSegment to a WAV format in-memory buffer
+            wav_buffer = io.BytesIO()
+            audio_segment.export(wav_buffer, format="wav")
+            wav_buffer.seek(0)
+            
+            # Use the buffer with SpeechRecognition
+            with sr.AudioFile(wav_buffer) as source:
+                audio_data = r.record(source)
+            
+            language_code = SUPPORTED_LANGUAGES[st.session_state.selected_language]
+            transcribed_prompt = r.recognize_google(audio_data, language=language_code)
+            return transcribed_prompt
+            
+    except Exception as e:
+        st.error(f"An error occurred during audio processing: {e}")
+        return None
 
 # --- Initialize Session State ---
 if "messages" not in st.session_state: st.session_state.messages = []
-if "last_audio_bytes" not in st.session_state: st.session_state.last_audio_bytes = None
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
 
 # --- Sidebar Configuration ---
 with st.sidebar:
     st.title("👨‍🏫 AI Tutor Setup")
-    # ... (rest of sidebar code is unchanged) ...
     st.markdown("Configure your AI Tutor and provide the lesson context here.")
+    
     api_key = get_config("GEMINI_API_KEY")
     if api_key:
         st.success("API key loaded successfully!", icon="✅")
     else:
         st.warning("API key not found. Please add it to your .env or secrets.", icon="⚠️")
         api_key = st.text_input("Enter your Gemini API Key:", type="password")
+    
     selected_language = st.selectbox("🌐 Choose your language:", options=list(SUPPORTED_LANGUAGES.keys()), key="selected_language")
     selected_tutor = st.radio("👤 Choose a Tutor:", list(TUTOR_CONFIG.keys()))
+    
     st.markdown("### 📚 Upload Chapter Pages")
     uploaded_files = st.file_uploader("Upload PDF or Images of the chapter pages:", type=['pdf', 'png', 'jpg', 'jpeg'], accept_multiple_files=True)
+    
     lesson_context = []
     if uploaded_files:
         with st.spinner("Reading files..."):
@@ -177,6 +174,7 @@ with st.sidebar:
             if text_context:
                 lesson_context.append(text_context)
             st.success(f"Successfully read {len(uploaded_files)} file(s)!", icon="📄")
+
     if st.button("Clear Chat History"):
         st.session_state.messages = []
         st.session_state.chat_session = None
@@ -184,9 +182,9 @@ with st.sidebar:
 
 # --- Main App Logic ---
 st.title(TUTOR_CONFIG[selected_tutor]["title"])
+
 base_persona = GYAN_MITRA_PERSONA if selected_tutor == "Gyan Mitra (Grade 5)" else KHEL_GURU_PERSONA
 language_instruction = ""
-# ... (language instruction logic is unchanged) ...
 if "English" in selected_language:
     language_instruction = "\n- **Primary Language:** Your primary language of instruction MUST be simple English. Do NOT use words from any other language for encouragement."
 else:
@@ -204,25 +202,29 @@ else:
     except Exception as e:
         st.error(f"Error configuring the AI model: {e}")
 
-# --- Process Voice Input (runs on every script rerun) ---
-process_voice_input(model, api_key, lesson_context, persona_text)
-
 # --- Display Chat History ---
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- Unified Input Handling Logic (New and Stable) ---
+# --- Combined Input Handling Logic ---
 prompt = None
 
-# Priority 1: Check for and consume transcribed text from a completed voice recording
-if transcribed_text := st.session_state.get("text_input"):
-    prompt = transcribed_text
-    st.session_state.text_input = "" # Clear state after consuming
+# Create columns for the audio recorder to give it a defined space
+col1, col2, col3 = st.columns([1, 3, 1])
+with col2:
+    # Display the recorder and capture audio
+    audio_segment = audiorecorder("Click to record your question 🎙️", "Recording... 🔴")
 
-# Priority 2: Check for text submitted via the main chat input widget
+# The chat input widget should be placed after other widgets
 if user_query := st.chat_input("What would you like to learn today?"):
     prompt = user_query
+
+# Process audio only if it exists and no text prompt was given
+if audio_segment and not prompt:
+    transcribed_prompt = process_voice_input(audio_segment)
+    if transcribed_prompt:
+        prompt = transcribed_prompt
 
 # If a prompt was captured from either source, process it
 if prompt:
@@ -233,10 +235,5 @@ if prompt:
     # Call the main handler to get and display the AI response
     handle_prompt(prompt, model, api_key, lesson_context, persona_text)
     
-    # Rerun the app to ensure the chat history is up-to-date in the display loop
-    st.rerun()
-
-# --- UI for Voice Input ---
-# The audiorecorder is placed separately at the bottom.
-# Its output is handled by the process_voice_input function at the top of the script.
-audiorecorder("Or click to record your question 🎙️", "Recording... 🔴", key="audio_recorder_bytes")
+    # Rerun to update the chat display
+    #st.rerun()
