@@ -22,10 +22,11 @@ load_dotenv()
 # --- One-time NLTK Downloader ---
 try:
     nltk.data.find('tokenizers/punkt')
+    nltk.data.find('tokenizers/punkt_tab')
 except LookupError:
-    st.info("First-time setup: Downloading the sentence tokenizer...")
+    st.info("First-time setup: Downloading NLTK sentence tokenizers...")
     nltk.download('punkt', quiet=True)
-
+    nltk.download('punkt_tab', quiet=True)
 
 # --- Helper Function to Sanitize Text for Speech ---
 def sanitize_text_for_speech(text):
