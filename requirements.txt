@@ -6,3 +6,4 @@ Pillow
 streamlit-audiorecorder
 SpeechRecognition
 pydub
+gTTS
