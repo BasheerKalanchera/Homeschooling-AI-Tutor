@@ -1,13 +1,11 @@
+# tutor_app.py that only handles the text based chat with AI tutor
+
 import streamlit as st
 import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 import fitz  # PyMuPDF
 from PIL import Image
-from audiorecorder import audiorecorder
-import speech_recognition as sr
-from pydub import AudioSegment
-import io
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -16,14 +14,6 @@ load_dotenv()
 TUTOR_CONFIG = {
     "Gyan Mitra (Grade 5)": {"persona": "GYAN_MITRA_PERSONA", "title": "🎓 Chat with Gyan Mitra"},
     "Khel-Khel Mein Guru (Grade 2)": {"persona": "KHEL_GURU_PERSONA", "title": "🎲 Play & Learn with Khel-Khel Mein Guru"}
-}
-SUPPORTED_LANGUAGES = {
-    "English (India)": "en-IN",
-    "Hindi (हिन्दी)": "hi-IN",
-    "Malayalam (മലയാളം)": "ml-IN",
-    "Arabic (Egypt)": "ar-EG",
-    "Arabic (Saudi Arabia)": "ar-SA",
-    "Arabic (U.A.E.)": "ar-AE",
 }
 
 # --- Page Configuration ---
@@ -43,7 +33,7 @@ Your goal is to help him understand concepts from the NCERT textbook pages provi
 **Your personality and rules:**
 - **Tone:** Be cheerful and use simple analogies related to everyday life, cricket, or popular Indian culture.
 - **Method:** Use the Socratic method. Ask guiding questions to help him arrive at the answer himself. Never give the direct answer to a problem unless he is completely stuck.
-- **Language:** Use simple English. Use words like 'Great!' or 'Good Job!' for encouragement.
+- **Language:** You MUST use simple English. Use words like 'Great!' or 'Good Job!' for encouragement. Do NOT use words from any other language.
 - **Curriculum:** You MUST base all your explanations, examples, and questions strictly on the content visible in the uploaded textbook pages. Do not introduce concepts outside this provided material.
 - **Math Formatting:** You MUST use LaTeX for all mathematical fractions, symbols, and equations. Enclose all LaTeX in single dollar signs. For example, to show one-third, you must write `$\frac{1}{3}$`.
 - **Interaction:** Start every new session by greeting the student warmly.
@@ -56,7 +46,7 @@ Your student is a 7-year-old in 2nd Grade, studying the CBSE curriculum.
 **Your personality and rules:**
 - **Tone:** Be very enthusiastic, use simple words, short sentences, and a conversational, friendly tone. Use lots of positive reinforcement ('Amazing!', 'You're a star!', 'Wow!').
 - **Method:** Teach through interactive challenges and simple stories based on the uploaded textbook pages. Explain a concept clearly and then immediately follow up with a fun activity.
-- **Language:** Use extremely simple English, suitable for a 7-year-old. Use words like 'Great!' or 'Good Job!' for encouragement.
+- **Language:** You MUST use extremely simple English, suitable for a 7-year-old. Use words like 'Great!' or 'Good Job!' for encouragement. Do NOT use words from any other language.
 - **Curriculum:** You MUST base all your explanations, stories, and activities strictly on the concepts found in the uploaded images or text from the textbook.
 - **Interaction:** Start every new session with an exciting greeting and suggest a fun learning game.
 
@@ -79,7 +69,7 @@ def get_config(key_name: str, default_value=None):
     return default_value
 
 def handle_prompt(prompt, model, api_key, lesson_context, persona_text):
-    """Appends prompt to history, gets a response, and handles streaming to the UI."""
+    """Appends prompt to history, gets a response, and handles displaying it in the UI."""
     if not api_key or not model:
         st.warning("AI model is not ready. Please check your API key in the sidebar.")
         st.stop()
@@ -90,8 +80,10 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text):
     try:
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
+                # Start a new chat session if one doesn't exist
                 if st.session_state.chat_session is None:
                     st.session_state.chat_session = model.start_chat()
+                    # Construct the initial prompt with persona and context
                     initial_prompt_parts = [
                         persona_text, "Here is the content from the textbook pages:",
                         *lesson_context, "\n---\n",
@@ -99,40 +91,17 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text):
                     ]
                     response = st.session_state.chat_session.send_message(initial_prompt_parts)
                 else:
+                    # Send a follow-up message with the lesson context
                     follow_up_prompt_parts = [prompt, *lesson_context]
                     response = st.session_state.chat_session.send_message(follow_up_prompt_parts)
 
             response_text = response.text
             st.markdown(response_text)
+            # Add assistant's response to chat history
             st.session_state.messages.append({"role": "assistant", "content": response_text})
 
     except Exception as e:
         st.error(f"An error occurred: {e}")
-
-def process_voice_input(audio_segment):
-    """Transcribes a pydub AudioSegment object to text and returns the text."""
-    if not audio_segment:
-        return None
-    try:
-        with st.spinner("Transcribing..."):
-            r = sr.Recognizer()
-            
-            # Export the AudioSegment to a WAV format in-memory buffer
-            wav_buffer = io.BytesIO()
-            audio_segment.export(wav_buffer, format="wav")
-            wav_buffer.seek(0)
-            
-            # Use the buffer with SpeechRecognition
-            with sr.AudioFile(wav_buffer) as source:
-                audio_data = r.record(source)
-            
-            language_code = SUPPORTED_LANGUAGES[st.session_state.selected_language]
-            transcribed_prompt = r.recognize_google(audio_data, language=language_code)
-            return transcribed_prompt
-            
-    except Exception as e:
-        st.error(f"An error occurred during audio processing: {e}")
-        return None
 
 # --- Initialize Session State ---
 if "messages" not in st.session_state: st.session_state.messages = []
@@ -143,6 +112,7 @@ with st.sidebar:
     st.title("👨‍🏫 AI Tutor Setup")
     st.markdown("Configure your AI Tutor and provide the lesson context here.")
     
+    # API Key Input
     api_key = get_config("GEMINI_API_KEY")
     if api_key:
         st.success("API key loaded successfully!", icon="✅")
@@ -150,12 +120,18 @@ with st.sidebar:
         st.warning("API key not found. Please add it to your .env or secrets.", icon="⚠️")
         api_key = st.text_input("Enter your Gemini API Key:", type="password")
     
-    selected_language = st.selectbox("🌐 Choose your language:", options=list(SUPPORTED_LANGUAGES.keys()), key="selected_language")
+    # Tutor Selection
     selected_tutor = st.radio("👤 Choose a Tutor:", list(TUTOR_CONFIG.keys()))
     
+    # File Uploader
     st.markdown("### 📚 Upload Chapter Pages")
-    uploaded_files = st.file_uploader("Upload PDF or Images of the chapter pages:", type=['pdf', 'png', 'jpg', 'jpeg'], accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Upload PDF or Images of the chapter pages:",
+        type=['pdf', 'png', 'jpg', 'jpeg'],
+        accept_multiple_files=True
+    )
     
+    # Process Uploaded Files
     lesson_context = []
     if uploaded_files:
         with st.spinner("Reading files..."):
@@ -175,6 +151,7 @@ with st.sidebar:
                 lesson_context.append(text_context)
             st.success(f"Successfully read {len(uploaded_files)} file(s)!", icon="📄")
 
+    # Clear Chat Button
     if st.button("Clear Chat History"):
         st.session_state.messages = []
         st.session_state.chat_session = None
@@ -183,17 +160,13 @@ with st.sidebar:
 # --- Main App Logic ---
 st.title(TUTOR_CONFIG[selected_tutor]["title"])
 
-base_persona = GYAN_MITRA_PERSONA if selected_tutor == "Gyan Mitra (Grade 5)" else KHEL_GURU_PERSONA
-language_instruction = ""
-if "English" in selected_language:
-    language_instruction = "\n- **Primary Language:** Your primary language of instruction MUST be simple English. Do NOT use words from any other language for encouragement."
-else:
-    language_instruction = "\n- **Primary Language:** Your primary language of instruction MUST be simple English."
+# Select the appropriate persona text based on the user's choice
+persona_text = GYAN_MITRA_PERSONA if selected_tutor == "Gyan Mitra (Grade 5)" else KHEL_GURU_PERSONA
 
-persona_text = base_persona + language_instruction
+# Configure the Generative AI model
 model = None
 if not api_key:
-    st.warning("Please provide your Gemini API Key in the sidebar to begin.")
+    st.info("Please provide your Gemini API Key in the sidebar to begin.")
 else:
     try:
         genai.configure(api_key=api_key)
@@ -207,33 +180,12 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- Combined Input Handling Logic ---
-prompt = None
-
-# Create columns for the audio recorder to give it a defined space
-col1, col2, col3 = st.columns([1, 3, 1])
-with col2:
-    # Display the recorder and capture audio
-    audio_segment = audiorecorder("Click to record your question 🎙️", "Recording... 🔴")
-
-# The chat input widget should be placed after other widgets
-if user_query := st.chat_input("What would you like to learn today?"):
-    prompt = user_query
-
-# Process audio only if it exists and no text prompt was given
-if audio_segment and not prompt:
-    transcribed_prompt = process_voice_input(audio_segment)
-    if transcribed_prompt:
-        prompt = transcribed_prompt
-
-# If a prompt was captured from either source, process it
-if prompt:
+# --- Chat Input Handling ---
+if prompt := st.chat_input("What would you like to learn today?"):
+    # Add user's message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
     
     # Call the main handler to get and display the AI response
     handle_prompt(prompt, model, api_key, lesson_context, persona_text)
-    
-    # Rerun to update the chat display
-    #st.rerun()
