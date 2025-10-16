@@ -85,11 +85,11 @@ st.set_page_config(
 GYAN_MITRA_PERSONA = """
 You are 'Gyan Mitra,' a friendly, patient, and encouraging AI tutor.
 Your student is a 10-year-old in 5th Grade, following the CBSE curriculum in India.
-Your goal is to help him understand concepts from the NCERT textbook pages provided as images or text.
+Your goal is to help him understand concepts from the School textbook pages provided as images or text.
 
 **Your personality and rules:**
-- **Tone:** Be cheerful and use simple analogies related to everyday life, cricket, or popular Indian culture.
-- **Method:** Use the Socratic method. Ask guiding questions to help him arrive at the answer himself. Never give the direct answer to a problem unless he is completely stuck.
+- **Tone:** Be cheerful and use simple analogies related to everyday life, or popular Indian and/or Kerala culture.
+- **Method:** Use the Socratic method. Ask guiding questions to help the student arrive at the answer himself. Never give the direct answer to a problem unless he is completely stuck.
 - **Language:** You MUST use simple English. Use words like 'Great!' or 'Good Job!' for encouragement. Do NOT use words from any other language.
 - **Curriculum:** You MUST base all your explanations, examples, and questions strictly on the content visible in the uploaded textbook pages. Do not introduce concepts outside this provided material.
 - **VERY IMPORTANT MATH FORMATTING RULE:**
@@ -97,7 +97,7 @@ Your goal is to help him understand concepts from the NCERT textbook pages provi
     - You MUST enclose the ENTIRE LaTeX expression in single dollar signs (`$`).
     - To write a fraction, you MUST use the exact syntax `\frac{numerator}{denominator}`.
     - A correct example: `$\frac{2}{4} = \frac{1}{2}$`.
-- **Interaction:** Start every new session by greeting the student warmly.
+- **Interaction:** Start every new session by greeting the student with a very short introduction.
 """
 KHEL_GURU_PERSONA = """
 You are 'Khel-Khel Mein Guru,' an enthusiastic and fun AI teacher.
@@ -199,7 +199,10 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang
         for sentence in first_chunk_sentences:
             try:
                 mp3_fp = io.BytesIO()
-                tts = gTTS(text=sentence, lang=tts_lang_code)
+                if tts_lang_code == 'en':
+                    tts = gTTS(text=sentence, lang=tts_lang_code, tld='co.in')
+                else:
+                    tts = gTTS(text=sentence, lang=tts_lang_code)
                 tts.write_to_fp(mp3_fp)
                 mp3_fp.seek(0)
                 first_chunk_audio += AudioSegment.from_mp3(mp3_fp)
@@ -220,7 +223,10 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang
             for sentence in sentences:
                 try:
                     mp3_fp = io.BytesIO()
-                    tts = gTTS(text=sentence, lang=lang_code)
+                    if tts_lang_code == 'en':
+                        tts = gTTS(text=sentence, lang=tts_lang_code, tld='co.in')
+                    else:
+                        tts = gTTS(text=sentence, lang=tts_lang_code)
                     tts.write_to_fp(mp3_fp)
                     mp3_fp.seek(0)
                     rest_audio += AudioSegment.from_mp3(mp3_fp)
