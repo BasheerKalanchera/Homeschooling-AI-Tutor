@@ -30,7 +30,23 @@ except LookupError:
 
 # --- Helper Function to Sanitize Text for Speech ---
 def sanitize_text_for_speech(text):
-    """Cleans text for TTS by removing unwanted characters, asterisks, and converting LaTeX."""
+    """Cleans text for TTS by removing unwanted characters, asterisks, emojis, and converting LaTeX."""
+    # Remove emojis
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map symbols
+        "\U0001F1E0-\U0001F1FF"  # flags (iOS)
+        "\u2600-\u26FF"  # miscellaneous symbols
+        "\u2700-\u27BF"  # dingbats
+        "\uFE0F"  # variation selector
+        "\u200d"  # zero width joiner
+        "]+",
+        flags=re.UNICODE,
+    )
+    text = emoji_pattern.sub(r'', text)
+
     text = text.replace('*', '')
     text = text.replace('\f', '')  # Remove form feed character
     pattern = r"\\frac\{(\d+)\}\{(\d+)\}"
@@ -108,7 +124,7 @@ Your student is a 7-year-old in 2nd Grade, studying the CBSE curriculum.
 - **Method:** Teach through interactive challenges and simple stories based on the uploaded textbook pages. Explain a concept clearly and then immediately follow up with a fun activity.
 - **Language:** You MUST use extremely simple English, suitable for a 7-year-old. Use words like 'Great!' or 'Good Job!' for encouragement. Do NOT use words from any other language.
 - **Curriculum:** You MUST base all your explanations, stories, and activities strictly on the concepts found in the uploaded images or text from the textbook.
-- **Interaction:** Start every new session with an exciting greeting and suggest a fun learning game.
+- **Interaction:** Start every new session by greeting the student with a fun learning game.
 
 **VERY IMPORTANT RESPONSE STYLE:**
 - **Keep it short!** Your replies must be very short and easy to read. Aim for only 2-3 sentences.
@@ -151,40 +167,27 @@ def process_voice_input(audio_segment, language_key):
     return None
 
 
-# --- Improved handle_prompt() with two audio placeholders ---
-def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang_code):
-    """
-    Uses threaded preload system with two placeholders to avoid
-    overwriting first audio before playback finishes.
-    """
+# --- handle_prompt() using gTTS with all fixes ---
+def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang_code, subject, language_key):
     try:
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 if st.session_state.chat_session is None:
                     st.session_state.chat_session = model.start_chat()
                     initial_prompt_parts = [
-                        persona_text,
-                        "Here is the textbook content:",
-                        *lesson_context,
-                        "\n---\n",
-                        "Respond to the student's first question:",
-                        prompt,
+                        persona_text, "Here is the textbook content:", *lesson_context,
+                        "\n---\n", "Respond to the student's first question:", prompt,
                     ]
                     response = st.session_state.chat_session.send_message(initial_prompt_parts)
                 else:
                     response = st.session_state.chat_session.send_message([prompt, *lesson_context])
 
             response_text = response.text
-            # ** KEY FIX HERE **
-            # Force-correct the malformed fraction character before displaying or speaking.
-            response_text = response_text.replace('\f', '\\')
-            response_text = response_text.replace('\\rac', '\\frac')
-            
+            response_text = response_text.replace('\f', '\\').replace('\\rac', '\\frac')
 
             st.markdown(response_text)
             st.session_state.messages.append({"role": "assistant", "content": response_text})
 
-        # --- Prepare TTS text ---
         speech_friendly_text = sanitize_text_for_speech(response_text)
         sentences = nltk.sent_tokenize(speech_friendly_text)
         if not sentences:
@@ -193,77 +196,73 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang
         FIRST_CHUNK_SIZE = 3
         first_chunk_sentences = sentences[:FIRST_CHUNK_SIZE]
         remaining_sentences = sentences[FIRST_CHUNK_SIZE:]
-
-        # --- Generate first chunk ---
+        
+        use_indian_accent = (language_key == "English (India)" and subject in ["Hindi", "Malayalam"])
+        
         first_chunk_audio = AudioSegment.empty()
         for sentence in first_chunk_sentences:
             try:
                 mp3_fp = io.BytesIO()
-                if tts_lang_code == 'en':
-                    tts = gTTS(text=sentence, lang=tts_lang_code, tld='co.in')
+                unique_sentence = f"{sentence.strip()}"
+                
+                if use_indian_accent:
+                    tts = gTTS(text=unique_sentence, lang=tts_lang_code, tld='co.in')
                 else:
-                    tts = gTTS(text=sentence, lang=tts_lang_code)
+                    tts = gTTS(text=unique_sentence, lang=tts_lang_code, tld='com') # American English
                 tts.write_to_fp(mp3_fp)
                 mp3_fp.seek(0)
                 first_chunk_audio += AudioSegment.from_mp3(mp3_fp)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"gTTS error: {e}")
 
         duration_in_seconds = len(first_chunk_audio) / 1000.0
-
-        # --- Prepare placeholders ---
         audio_placeholder_1 = st.empty()
         audio_placeholder_2 = st.empty()
-
-        # --- Start preloading 2nd clip in background ---
         rest_audio_container = {}
 
-        def generate_rest_audio(sentences, lang_code, result_container):
+        def generate_rest_audio(sentences, lang_code, result_container, subject, language_key):
             rest_audio = AudioSegment.empty()
+            use_indian_accent_thread = (language_key == "English (India)" and subject in ["Hindi", "Malayalam"])
             for sentence in sentences:
                 try:
                     mp3_fp = io.BytesIO()
-                    if tts_lang_code == 'en':
-                        tts = gTTS(text=sentence, lang=tts_lang_code, tld='co.in')
+                    unique_sentence = f"{sentence.strip()}"
+
+                    if use_indian_accent_thread:
+                        tts = gTTS(text=unique_sentence, lang=lang_code, tld='co.in')
                     else:
-                        tts = gTTS(text=sentence, lang=tts_lang_code)
+                        tts = gTTS(text=unique_sentence, lang=lang_code, tld='com') # American English
                     tts.write_to_fp(mp3_fp)
                     mp3_fp.seek(0)
                     rest_audio += AudioSegment.from_mp3(mp3_fp)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"gTTS error in thread: {e}")
             result_container["audio"] = rest_audio
 
         if remaining_sentences:
             bg_thread = threading.Thread(
                 target=generate_rest_audio,
-                args=(remaining_sentences, tts_lang_code, rest_audio_container),
+                args=(remaining_sentences, tts_lang_code, rest_audio_container, subject, language_key),
                 daemon=True
             )
             bg_thread.start()
 
-        # --- Play first audio ---
-        first_buffer = io.BytesIO()
-        first_chunk_audio.export(first_buffer, format="mp3")
-        first_buffer.seek(0)
-        audio_placeholder_1.audio(first_buffer, format='audio/mp3', autoplay=True)
+        if len(first_chunk_audio) > 0:
+            first_buffer = io.BytesIO()
+            first_chunk_audio.export(first_buffer, format="mp3")
+            first_buffer.seek(0)
+            audio_placeholder_1.audio(first_buffer, format='audio/mp3', autoplay=True)
 
-        # --- Wait loop for playback duration ---
         elapsed = 0
         sleep_interval = 0.25
         while elapsed < duration_in_seconds:
             time.sleep(sleep_interval)
             elapsed += sleep_interval
 
-        # --- After first finishes, play second if ready ---
         if remaining_sentences:
-            bg_thread.join(timeout=0)  # ensure finished if done
+            bg_thread.join(timeout=0)
             rest_audio = rest_audio_container.get("audio", None)
             if rest_audio and len(rest_audio) > 0:
-                # 🔹 Clear the first audio player from UI
-                audio_placeholder_1.empty()
-
-                # Then play the next clip
                 rest_buffer = io.BytesIO()
                 rest_audio.export(rest_buffer, format="mp3")
                 rest_buffer.seek(0)
@@ -282,14 +281,16 @@ if "chat_session" not in st.session_state:
 with st.sidebar:
     st.title("👨‍🏫 AI Tutor Setup")
     api_key = get_config("GEMINI_API_KEY")
-    if api_key:
-        st.success("API key loaded!", icon="✅")
+    if api_key: st.success("API key loaded!", icon="✅")
     else:
         st.warning("API key not found.", icon="⚠️")
         api_key = st.text_input("Enter your Gemini API Key:", type="password")
 
     selected_language = st.selectbox("🌐 Choose your language:", options=list(SUPPORTED_LANGUAGES.keys()), key="selected_language")
     selected_tutor = st.radio("👤 Choose a Tutor:", list(TUTOR_CONFIG.keys()))
+    
+    subjects = ["English", "Grammar", "EVS", "Mathematics", "Hindi", "Malayalam"]
+    selected_subject = st.selectbox("📘 Choose your subject:", options=subjects)
 
     st.markdown("### 📚 Upload Chapter Pages")
     uploaded_files = st.file_uploader("Upload PDF or Images:", type=['pdf', 'png', 'jpg', 'jpeg'], accept_multiple_files=True)
@@ -308,8 +309,7 @@ with st.sidebar:
                         lesson_context.append(Image.open(file))
                 except Exception as e:
                     st.error(f"Error reading {file.name}: {e}")
-            if text_context:
-                lesson_context.append(text_context)
+            if text_context: lesson_context.append(text_context)
             st.success(f"Read {len(uploaded_files)} file(s)!", icon="📄")
 
     if st.button("Clear Chat History"):
@@ -350,6 +350,15 @@ if audio_segment_data:
         with st.chat_message("user"):
             st.markdown(transcribed_prompt)
         if model:
-            handle_prompt(transcribed_prompt, model, api_key, lesson_context, persona_text, tts_lang_code)
+            handle_prompt(
+                transcribed_prompt,
+                model,
+                api_key,
+                lesson_context,
+                persona_text,
+                tts_lang_code,
+                selected_subject,
+                selected_language
+            )
         else:
             st.warning("Please provide your API key in the sidebar to start.")
