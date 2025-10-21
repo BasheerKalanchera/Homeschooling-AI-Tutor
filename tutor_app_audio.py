@@ -1,5 +1,8 @@
 # tutor_app_audio.py
 
+# Removed all the Arabic references and I fixed the StreamlitAPIException that occurred when pressing the "Clear Chat History" button. I moved all the session-clearing logic (for messages, # chat session, files, etc.) into a new function named clear_all_state. This function is now passed to the button's on_click parameter, which executes before the page reruns, safely
+# clearing the file uploader's state without conflict.
+
 import streamlit as st
 import google.generativeai as genai
 import os
@@ -16,6 +19,23 @@ import time
 import re
 import threading
 import streamlit.components.v1 as components
+
+# --- NEW: Added pytesseract for OCR ---
+import pytesseract
+
+# ---
+# CRITICAL: TESSERACT INSTALLATION REQUIRED
+#
+# This script now uses pytesseract for Optical Character Recognition (OCR).
+# You MUST install the Tesseract engine on your system:
+#
+# 1. Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki
+#    (Make sure to check the "Malayalam" language pack during installation)
+# 2. macOS: brew install tesseract tesseract-lang
+# 3. Linux: sudo apt-get install tesseract-ocr tesseract-ocr-mal
+#
+# You also need the Python library: pip install pytesseract
+# ---
 
 
 def scroll_chat_to_latest(delay_ms: int = 250):
@@ -134,18 +154,12 @@ TUTOR_CONFIG = {
 SUPPORTED_LANGUAGES = {
     "English (India)": "en-IN",
     "Hindi (हिन्दी)": "hi-IN",
-    "Malayalam (മലയാളം)": "ml-IN",
-    "Arabic (Egypt)": "ar-EG",
-    "Arabic (Saudi Arabia)": "ar-SA",
-    "Arabic (U.A.E.)": "ar-AE",
+    "Malayalam (മലയാളം)": "ml-IN"    
 }
 TTS_LANG_CODES = {
     "English (India)": "en",
     "Hindi (हिन्दी)": "hi",
-    "Malayalam (മലയാളം)": "ml",
-    "Arabic (Egypt)": "ar",
-    "Arabic (Saudi Arabia)": "ar",
-    "Arabic (U.A.E.)": "ar",
+    "Malayalam (മലയാളം)": "ml"    
 }
 
 st.set_page_config(
@@ -165,7 +179,6 @@ Your goal is to help him understand concepts from the School textbook pages prov
 **Your personality and rules:**
 - **Tone:** Be cheerful and use simple analogies related to everyday life, or popular Indian and/or Kerala culture.
 - **Method:** Use the Socratic method. Ask guiding questions to help the student arrive at the answer himself. Never give the direct answer to a problem unless he is completely stuck.
-- **Language:** You MUST use simple English. Use words like 'Great!' or 'Good Job!' for encouragement. Do NOT use words from any other language.
 - **Curriculum:** You MUST base all your explanations, examples, and questions strictly on the content visible in the uploaded textbook pages. Do not introduce concepts outside this provided material.
 - **VERY IMPORTANT MATH FORMATTING RULE:**
     - You MUST use LaTeX for all mathematical expressions.
@@ -173,6 +186,11 @@ Your goal is to help him understand concepts from the School textbook pages prov
     - To write a fraction, you MUST use the exact syntax `\frac{numerator}{denominator}`.
     - A correct example: `$\frac{2}{4} = \frac{1}{2}$`.
 - **Interaction:** Start every new session by greeting the student with a very short introduction.
+- **NEW: RESPONSE STYLE:**
+    - **Keep it concise.** Your replies should be clear and to the point.
+    - **Focus on one idea.** Explain only one small concept or ask one guiding question at a time.
+    - **Use simple language.** Even for Grade 5, avoid complex sentences.
+    - **End with a question.** Always try to end your response with a question to keep the conversation going.
 """
 KHEL_GURU_PERSONA = """
 You are 'Khel-Khel Mein Guru,' an enthusiastic and fun AI teacher.
@@ -181,7 +199,6 @@ Your student is a 7-year-old in 2nd Grade, studying the CBSE curriculum.
 **Your personality and rules:**
 - **Tone:** Be very enthusiastic, use simple words, short sentences, and a conversational, friendly tone. Use lots of positive reinforcement ('Amazing!', 'You're a star!', 'Wow!').
 - **Method:** Teach through interactive challenges and simple stories based on the uploaded textbook pages. Explain a concept clearly and then immediately follow up with a fun activity.
-- **Language:** You MUST use extremely simple English, suitable for a 7-year-old. Use words like 'Great!' or 'Good Job!' for encouragement. Do NOT use words from any other language.
 - **Curriculum:** You MUST base all your explanations, stories, and activities strictly on the concepts found in the uploaded images or text from the textbook.
 - **Interaction:** Start every new session by greeting the student with a fun learning game.
 
@@ -205,7 +222,6 @@ def get_config(key_name: str, default_value=None):
         pass
     return default_value
 
-# --- Cached Model Loader (per suggestion 6) ---
 @st.cache_resource
 def get_model(api_key):
     """Loads and configures the GenerativeModel, caching it."""
@@ -232,44 +248,176 @@ def process_voice_input(audio_segment, language_key):
         st.error(f"Audio processing error: {e}")
     return None
 
-# --- NEW: File Processing Callback ---
-def process_files():
+# --- PHASE 2 MODIFICATION: START ---
+# This function is now the "Intelligent Triage" pipeline
+@st.cache_data(max_entries=10) # Cache processing for uploaded files
+def process_files_triage(uploaded_files_data, selected_subject, selected_language):
     """
-    Callback function to process uploaded files.
-    Runs ONLY when the file uploader's state changes.
-    """
-    # Get files from session state using the uploader's key
-    uploaded_files = st.session_state.file_uploader_key
+    Callback function to process uploaded files with "Intelligent Triage".
+    Detects native vs. scanned PDFs, OCRs images, and builds a multimodal context.
     
-    if not uploaded_files:
-        st.session_state.lesson_context = [] # Clear context if no files
-        return
-
+    Returns:
+        list[dict]: A list of "chunks", where each chunk is a dictionary:
+                    {"text": str|None, "image": PIL.Image|None, "source": str}
+    """
     new_context = []
-    text_context = ""
     
-    with st.spinner("Reading files..."):
-        for file in uploaded_files:
+    # Map subjects/languages to Tesseract language codes
+    lang_map = {
+        "Malayalam": "mal",
+        "Hindi": "hin",
+        "English": "eng",
+        "Grammar": "eng",
+        "EVS": "eng",
+        "Mathematics": "eng"        
+    }
+    
+    # Determine the correct OCR language
+    ocr_lang_key = selected_subject if selected_subject in lang_map else selected_language
+    ocr_lang = lang_map.get(ocr_lang_key, "eng") # Default to English
+    
+    if ocr_lang != "eng":
+        st.sidebar.info(f"Using Tesseract '{ocr_lang}' language pack for OCR.")
+
+    with st.spinner("Analyzing and extracting content from files..."):
+        for file_data in uploaded_files_data:
+            # --- THIS IS THE FIX ---
+            file_data = dict(file_data)
+            # --- END FIX ---
+            file_name = file_data['name']
+            file_type = file_data['type']
+            file_bytes = file_data['bytes']
+            
             try:
-                if file.type == "application/pdf":
-                    # Read PDF content
-                    pdf_doc = fitz.open(stream=file.read(), filetype="pdf")
-                    for page in pdf_doc:
-                        text_context += page.get_text() + "\n\n"
+                if file_type == "application/pdf":
+                    # --- PDF TRIAGE ---
+                    pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+                    is_scanned = False
+                    
+                    # Test the first page for text
+                    first_page_text = pdf_doc[0].get_text("text")
+                    if not first_page_text.strip():
+                        is_scanned = True
+                        
+                    if is_scanned:
+                        # --- Strategy 1: Scanned PDF ---
+                        st.sidebar.warning(f"{file_name} seems scanned. Processing with OCR.")
+                        for page_num, page in enumerate(pdf_doc):
+                            # Render page to an image
+                            pix = page.get_pixmap(dpi=200) # 200 DPI is a good balance
+                            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                            
+                            # OCR the image
+                            page_text = pytesseract.image_to_string(img, lang=ocr_lang)
+                            
+                            # Add BOTH text and image to the context
+                            new_context.append({
+                                "source": f"{file_name} (Page {page_num + 1})",
+                                "text": page_text,
+                                "image": img  # Send the full-res image to the LLM
+                            })
+                            
+                    else:
+                        # --- Strategy 2: Native PDF ---
+                        st.sidebar.success(f"{file_name} is a native PDF.")
+                        for page_num, page in enumerate(pdf_doc):
+                            # Add text chunk
+                            page_text = page.get_text("text")
+                            if page_text.strip():
+                                new_context.append({
+                                    "source": f"{file_name} (Page {page_num + 1} Text)",
+                                    "text": page_text,
+                                    "image": None
+                                })
+                            
+                            # Also extract images from the page as separate chunks
+                            image_list = page.get_images(full=True)
+                            for img_index, img_info in enumerate(image_list):
+                                try:
+                                    xref = img_info[0]
+                                    base_image = pdf_doc.extract_image(xref)
+                                    image_bytes = base_image["image"]
+                                    img = Image.open(io.BytesIO(image_bytes))
+                                    
+                                    new_context.append({
+                                        "source": f"{file_name} (Page {page_num + 1}, Image {img_index + 1})",
+                                        "text": None, # No text for this chunk, just the image
+                                        "image": img
+                                    })
+                                except Exception as img_e:
+                                    # Skip images that error out (e.g., small masks)
+                                    print(f"Skipping non-renderable image on page {page_num+1}: {img_e}")
+
                 else:
-                    # Read image content
-                    new_context.append(Image.open(file))
+                    # --- Strategy 3: Image File ---
+                    img = Image.open(io.BytesIO(file_bytes))
+                    
+                    # OCR the image
+                    extracted_text = pytesseract.image_to_string(img, lang=ocr_lang)
+                    
+                    # Add BOTH text and image to the context
+                    new_context.append({
+                        "source": f"{file_name}",
+                        "text": extracted_text,
+                        "image": img
+                    })
+
             except Exception as e:
-                st.error(f"Error reading {file.name}: {e}")
+                st.error(f"Error processing {file_name}: {e}")
     
-    if text_context:
-        new_context.append(text_context)
+    return new_context
+
+def run_file_processing():
+    """
+    Wrapper function to be called by the `on_change` event.
+    It reads file data and passes it to the cached triage function.
+    """
+    uploaded_files = st.session_state.file_uploader_key
+    if not uploaded_files:
+        st.session_state.lesson_context = []
+        return
+        
+    # Create a serializable list of file data for caching
+    uploaded_files_data = [
+        {"name": f.name, "type": f.type, "bytes": f.read()} 
+        for f in uploaded_files
+    ]
     
-    # Store the processed content in session state
-    st.session_state.lesson_context = new_context
+    # Call the cached function
+    st.session_state.lesson_context = process_files_triage(
+        tuple(frozenset(item.items()) for item in uploaded_files_data), # Make it hashable
+        st.session_state.selected_subject,
+        st.session_state.selected_language
+    )
+# --- PHASE 2 MODIFICATION: END ---
 
 
-# --- OPTIMIZED handle_prompt() with 2-call TTS logic ---
+# --- ERROR FIX: START ---
+def clear_all_state():
+    """Callback function to clear all session state."""
+    st.session_state.messages = []
+    st.session_state.chat_session = None
+    st.session_state.last_audio_processed = None
+    #st.session_state.lesson_context = [] # Clear processed files
+    
+    # Set the file uploader's state to an empty list.
+    # This is allowed because it's in a callback.
+    #st.session_state.file_uploader_key = [] 
+    
+    # Clear the cache for file processing
+    #process_files_triage.clear()
+    # Streamlit reruns automatically after the callback, no st.rerun() needed.
+    # --- THIS IS THE FIX ---
+    # We must also clear the state of the recorder widget itself.
+    # Its key is "recorder"
+    if "recorder" in st.session_state:
+        st.session_state.recorder = None
+    # --- END FIX ---
+# --- ERROR FIX: END ---
+
+
+# --- PHASE 2 MODIFICATION: START ---
+# This function is now upgraded to send a multimodal prompt
 def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang_code, subject, language_key):
     try:
         # Assistant's response container
@@ -277,15 +425,46 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang
             # Assistant's thinking spinner
             with st.spinner("Thinking..."):
                 if st.session_state.chat_session is None:
+                    # --- THIS IS THE MULTIMODAL UPGRADE ---
                     st.session_state.chat_session = model.start_chat()
+                    
+                    # 1. Start with the persona
                     initial_prompt_parts = [
-                        persona_text, "Here is the textbook content:", *lesson_context,
-                        "\n---\n", "Respond to the student's first question:", prompt,
+                        persona_text, 
+                        "Here is the textbook content you must use:"
                     ]
-                    response = st.session_state.chat_session.send_message(initial_prompt_parts)
-                else:
-                    response = st.session_state.chat_session.send_message([prompt, *lesson_context])
+                    
+                    # 2. Add the multimodal context (text and images)
+                    if not lesson_context:
+                        initial_prompt_parts.append("\n[No textbook content was uploaded. Please answer based on general knowledge.]")
+                    else:
+                        for chunk in lesson_context:
+                            # Add a separator for clarity
+                            initial_prompt_parts.append(f"\n--- Context from {chunk['source']} ---")
+                            
+                            # If this chunk has text, append the text string
+                            if chunk["text"] and chunk["text"].strip():
+                                initial_prompt_parts.append(chunk["text"])
+                                
+                            # If this chunk has an image, append the PIL Image object
+                            if chunk["image"]:
+                                initial_prompt_parts.append(chunk["image"])
 
+                    
+                    # 3. Add the user's first prompt at the very end
+                    initial_prompt_parts.append("\n---\n")
+                    initial_prompt_parts.append("Now, respond to the student's first question:")
+                    initial_prompt_parts.append(prompt)
+                    
+                    # 4. Send the *entire list* of [text, images, text, text, ...]
+                    response = st.session_state.chat_session.send_message(initial_prompt_parts)
+                
+                else:
+                    # *** THIS IS THE FIX ***
+                    # SUBSEQUENT TURNS: Only send the new prompt. 
+                    # The model remembers the persona and extracted text from the first turn.
+                    response = st.session_state.chat_session.send_message(prompt)
+                    
             response_text = response.text.replace('\f', '\\').replace('\\rac', '\\frac')
 
             st.markdown(response_text)
@@ -377,13 +556,14 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang
 
     except Exception as e:
         st.error(f"An error occurred: {e}")
+# --- PHASE 2 MODIFICATION: END ---
 
 
 # --- Initialize Session State ---
 st.session_state.setdefault('messages', [])
 st.session_state.setdefault('chat_session', None)
 st.session_state.setdefault('last_audio_processed', None) # To prevent loop
-st.session_state.setdefault('lesson_context', []) # NEW: For processed files
+st.session_state.setdefault('lesson_context', []) # NEW: For processed files (list[dict])
 
 with st.sidebar:
     st.title("👨‍🏫 AI Tutor Setup")
@@ -393,50 +573,76 @@ with st.sidebar:
         st.warning("API key not found.", icon="⚠️")
         api_key = st.text_input("Enter your Gemini API Key:", type="password")
 
-    selected_language = st.selectbox("🌐 Choose your language:", options=list(SUPPORTED_LANGUAGES.keys()), key="selected_language")
+    selected_language = st.selectbox(
+        "🌐 Choose your language:", 
+        options=list(SUPPORTED_LANGUAGES.keys()), 
+        key="selected_language"
+    )
     selected_tutor = st.radio("👤 Choose a Tutor:", list(TUTOR_CONFIG.keys()))
     
     subjects = ["English", "Grammar", "EVS", "Mathematics", "Hindi", "Malayalam"]
-    selected_subject = st.selectbox("📘 Choose your subject:", options=subjects)
+    selected_subject = st.selectbox(
+        "📘 Choose your subject:", 
+        options=subjects, 
+        key="selected_subject"
+    )
 
     st.markdown("### 📚 Upload Chapter Pages")
     
     # --- MODIFIED: File Uploader ---
-    # We use a key and an on_change callback.
     uploaded_files = st.file_uploader(
         "Upload PDF or Images:", 
         type=['pdf', 'png', 'jpg', 'jpeg'], 
         accept_multiple_files=True,
         key="file_uploader_key",  # A unique key to access its state
-        on_change=process_files   # The function to call when files change
+        on_change=run_file_processing   # Call the wrapper function
     )
 
     # This part now just shows a success message if context exists
-    # It does NOT re-process the files.
     if st.session_state.lesson_context:
-        # Get the file count from the uploader's state key
-        file_count = len(st.session_state.file_uploader_key)
-        st.success(f"Read {file_count} file(s)!", icon="📄")
+        chunk_count = len(st.session_state.lesson_context)
+        st.success(f"Processed {chunk_count} text/image chunks!", icon="📄")
 
 
-    # --- MODIFIED: Clear Chat Button ---
-    if st.button("Clear Chat History"):
-        st.session_state.messages = []
-        st.session_state.chat_session = None
-        st.session_state.last_audio_processed = None
-        st.session_state.lesson_context = [] # Clear processed files
-        #st.session_state.file_uploader_key = [] # Clear the file uploader widget
-        st.rerun()
+    # --- ERROR FIX: START ---
+    # Replaced the `if st.button(...)` block with this:
+    st.button("Clear Chat History", on_click=clear_all_state)
+    # --- ERROR FIX: END ---
+
 
 # --- Main App Logic ---
 st.title(TUTOR_CONFIG[selected_tutor]["title"])
 
+# 1. Get the base persona
 base_persona = GYAN_MITRA_PERSONA if selected_tutor == "Gyan Mitra (Grade 5)" else KHEL_GURU_PERSONA
-language_instruction = f"\n- **Primary Language:** Your language MUST be {selected_language}."
-persona_text = base_persona + language_instruction
 tts_lang_code = TTS_LANG_CODES[selected_language]
 
-# --- Load Model (using cached function from suggestion 6) ---
+# 2. Define the dynamic language instruction
+language_instruction = f"\n- **Language:** You MUST converse ONLY in {selected_language}. Do not use any other language, except for technical terms if absolutely necessary."
+
+# 3. Define the dynamic subject-specific instruction
+subject_instruction = ""
+if selected_subject == "Malayalam":
+    subject_instruction = (
+        "\n- **Subject Focus (Malayalam):** You are a Malayalam language expert. "
+        "Your student is learning Malayalam. "
+        "When the student asks about the Malayalam textbook (e.g., poems, stories, grammar), "
+        "you MUST provide clear, accurate, and culturally relevant explanations *in Malayalam*. "
+        "Pay close attention to specific user requests, such as: "
+        "  - 'അർത്ഥം' (meaning): Provide the meaning of the word. "
+        "  - 'വ്യാകരണം' (grammar): Explain the grammar concept. "
+        "  - 'ആശയം' (summary/idea): Summarize the passage or poem. "
+        "  - 'ചോദ്യം' (question): Answer the question based on the text. "
+        "Always be encouraging and. ensure your explanation is appropriate for the student's grade level."
+    )
+
+
+
+# 4. Assemble the final prompt
+persona_text = base_persona + language_instruction + subject_instruction
+
+
+# --- Load Model ---
 model = None
 if api_key:
     try:
@@ -472,12 +678,9 @@ with right_column:
     # Use a unique key for the audiorecorder to help manage state
     audio_segment_data = audiorecorder("Click to record 🎙️", "Recording... 🔴", key="recorder")
 
-# This is the stable, non-looping interaction block
 if audio_segment_data:
-    # Check if this audio has already been processed using its raw data
     if st.session_state.last_audio_processed != audio_segment_data.raw_data:
-        # It's new audio, process it
-        st.session_state.last_audio_processed = audio_segment_data.raw_data # Mark as processed
+        st.session_state.last_audio_processed = audio_segment_data.raw_data
         
         transcribed_prompt = process_voice_input(audio_segment_data, selected_language)
         if transcribed_prompt:
@@ -493,7 +696,7 @@ if audio_segment_data:
                     transcribed_prompt,
                     model,
                     api_key,
-                    lesson_context, # Pass the pre-processed context
+                    lesson_context, # Pass the multimodal list[dict] context
                     persona_text,
                     tts_lang_code,
                     selected_subject,
