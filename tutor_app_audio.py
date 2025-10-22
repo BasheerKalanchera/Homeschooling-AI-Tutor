@@ -1,7 +1,9 @@
 # tutor_app_audio.py
 
-# Removed all the Arabic references and I fixed the StreamlitAPIException that occurred when pressing the "Clear Chat History" button. I moved all the session-clearing logic (for messages, # chat session, files, etc.) into a new function named clear_all_state. This function is now passed to the button's on_click parameter, which executes before the page reruns, safely
-# clearing the file uploader's state without conflict.
+# --- UPDATED SCRIPT ---
+# 1. Personas updated to request dual output (display_text vs. speech_text)
+# 2. handle_prompt updated to parse this dual output.
+# 3. sanitize_text_for_speech updated to be a robust fallback.
 
 import streamlit as st
 import google.generativeai as genai
@@ -105,10 +107,56 @@ if "initialized" not in st.session_state:
     
     st.session_state.initialized = True
 
-# --- Helper Function to Sanitize Text for Speech ---
+# --- Helper Function to Sanitize Text for Speech (NOW A FALLBACK) ---
 def sanitize_text_for_speech(text):
-    """Cleans text for TTS by removing unwanted characters, asterisks, emojis, and converting LaTeX."""
-    # Remove emojis
+    """
+    Cleans text for TTS by removing unwanted characters, asterisks, emojis, 
+    and converting LaTeX.
+    This is now a FALLBACK for when the LLM fails to provide clean speech_text.
+    """
+
+    # 1. Remove LaTeX math delimiters
+    text = text.replace('$', '')
+
+    # 2. Handle LaTeX \text{...} command
+    #    Example: "\text{ cm}" becomes " cm"
+    text = re.sub(r'\\text\{([^}]+)\}', r'\1', text)
+
+    # 3. Handle LaTeX fractions
+    fraction_pattern = r"\\frac\{(\d+)\}\{(\d+)\}"
+    def replace_fraction(match):
+        numerator = int(match.group(1))
+        denominator = int(match.group(2))
+        if numerator == 1:
+            if denominator == 2: return "one-half"
+            if denominator == 3: return "one-third"
+            if denominator == 4: return "one-fourth"
+        return f"{numerator} over {denominator}"
+    text = re.sub(fraction_pattern, replace_fraction, text)
+
+    # 4. Handle Roman numerals in parentheses, e.g., (v) -> "roman numeral 5"
+    roman_map = {
+        'i': '1', 'ii': '2', 'iii': '3', 'iv': '4', 'v': '5',
+        'vi': '6', 'vii': '7', 'viii': '8', 'ix': '9', 'x': '10'
+    }
+    def replace_roman(match):
+        numeral = match.group(1).lower()
+        if numeral in roman_map:
+            return f"roman numeral {roman_map[numeral]}"
+        return match.group(0) # Return original if not in map
+    text = re.sub(r'\(([ivxIVX]+)\)', replace_roman, text)
+
+
+    # 5. Remove other common LaTeX commands/artifacts
+    text = text.replace('\\,', ' ')  # thin space
+    text = text.replace('\\ ', ' ')  # escaped space
+    text = text.replace('\\', '')    # Remove any remaining stray backslashes
+
+    # 6. Handle "fill in the blank" underscores/dashes
+    #    Replaces "____" or "----" with the word "blank"
+    text = re.sub(r'[_—-]{3,}', ' blank ', text) 
+
+    # 7. Original Emoji remover
     emoji_pattern = re.compile(
         "["
         "\U0001F600-\U0001F64F"  # emoticons
@@ -125,25 +173,14 @@ def sanitize_text_for_speech(text):
         flags=re.UNICODE,
     )
     text = emoji_pattern.sub(r'', text)
-
+    
+    # 8. Original simple replacements
     text = text.replace('*', '')
     text = text.replace('\f', '')  # Remove form feed character
-    pattern = r"\\frac\{(\d+)\}\{(\d+)\}"
 
-    def replace_fraction(match):
-        numerator = int(match.group(1))
-        denominator = int(match.group(2))
-        if numerator == 1:
-            if denominator == 2:
-                return "one-half"
-            if denominator == 3:
-                return "one-third"
-            if denominator == 4:
-                return "one-fourth"
-        return f"{numerator} over {denominator}"
-
-    text = text.replace('$', '')
-    processed_text = re.sub(pattern, replace_fraction, text)
+    # 9. Final cleanup: normalize all spaces to a single space
+    processed_text = re.sub(r'\s+', ' ', text).strip()
+    
     return processed_text
 
 # --- Constants and Page Config ---
@@ -171,6 +208,8 @@ st.set_page_config(
 
 
 # --- Prompts and Personas ---
+
+# --- UPDATED PERSONA 1 ---
 GYAN_MITRA_PERSONA = """
 You are 'Gyan Mitra,' a friendly, patient, and encouraging AI tutor.
 Your student is a 10-year-old in 5th Grade, following the CBSE curriculum in India.
@@ -180,33 +219,75 @@ Your goal is to help him understand concepts from the School textbook pages prov
 - **Tone:** Be cheerful and use simple analogies related to everyday life, or popular Indian and/or Kerala culture.
 - **Method:** Use the Socratic method. Ask guiding questions to help the student arrive at the answer himself. Never give the direct answer to a problem unless he is completely stuck.
 - **Curriculum:** You MUST base all your explanations, examples, and questions strictly on the content visible in the uploaded textbook pages. Do not introduce concepts outside this provided material.
-- **VERY IMPORTANT MATH FORMATTING RULE:**
-    - You MUST use LaTeX for all mathematical expressions.
-    - You MUST enclose the ENTIRE LaTeX expression in single dollar signs (`$`).
-    - To write a fraction, you MUST use the exact syntax `\frac{numerator}{denominator}`.
-    - A correct example: `$\frac{2}{4} = \frac{1}{2}$`.
-- **Interaction:** Start every new session by greeting the student with a very short introduction.
-- **NEW: RESPONSE STYLE:**
-    - **Keep it concise.** Your replies should be clear and to the point.
-    - **Focus on one idea.** Explain only one small concept or ask one guiding question at a time.
-    - **Use simple language.** Even for Grade 5, avoid complex sentences.
-    - **End with a question.** Always try to end your response with a question to keep the conversation going.
+- **Conciseness:** Keep replies concise. Explain one small concept or ask one guiding question at a time.
+- **Engagement:** Always try to end your response with a question to keep the conversation going.
+
+**CRITICAL: RESPONSE FORMAT**
+You MUST provide your answer in two parts, separated by the exact token "||SPEECH_BREAK||".
+
+1.  **display_text:** This is the visual response for the student.
+    - It MUST use LaTeX enclosed in single dollar signs (`$`) for all math (e.g., `$\frac{1}{2}$`).
+    - **VERY IMPORTANT:** After writing a LaTeX expression like `$\frac{4}{6}$`, DO NOT add any extra plain-text numbers like `6 4` or `4/6`. The model must ONLY output the pure LaTeX.
+    - **Bad display_text:** `Here is $\frac{4}{6} 6 4`
+    - **Good display_text:** `Here is $\frac{4}{6}`
+    - Use markdown for formatting and underscores (`____`) for "fill-in-the-blank" questions.
+
+2.  **speech_text:** This is the text for the audio engine. It MUST be 100% clean, spelled-out, and ready for Text-to-Speech.
+    - All LaTeX (like `$\frac{1}{2}$`) must be converted to plain words (e.g., "one-half").
+    - All math (like `$6 \text{ m } 50 \text{ cm}$`) must be plain words (e.g., "6 meters 50 centimeters").
+    - All "fill-in-the-blank" lines (`____`) must be replaced with the word "blank".
+    - All parenthesized list items like (i), (ii), (v) must be spelled out (e.g., "roman numeral 1", "roman numeral 2", "roman numeral 5").
+    - Do not include any asterisks, markdown, or emojis.
+
+**EXAMPLE 1 (Math):**
+display_text: Great job! The answer is $\frac{1}{2}$. Now, try this one: 5 ____ 10.
+||SPEECH_BREAK||
+speech_text: Great job! The answer is one-half. Now, try this one: 5 blank 10.
+
+**EXAMPLE 2 (List):**
+display_text: Let's look at question (v), "In shape (v),..."
+||SPEECH_BREAK||
+speech_text: Let's look at question roman numeral 5, "In shape roman numeral 5,..."
 """
+
+# --- UPDATED PERSONA 2 ---
 KHEL_GURU_PERSONA = """
 You are 'Khel-Khel Mein Guru,' an enthusiastic and fun AI teacher.
 Your student is a 7-year-old in 2nd Grade, studying the CBSE curriculum.
 
 **Your personality and rules:**
 - **Tone:** Be very enthusiastic, use simple words, short sentences, and a conversational, friendly tone. Use lots of positive reinforcement ('Amazing!', 'You're a star!', 'Wow!').
-- **Method:** Teach through interactive challenges and simple stories based on the uploaded textbook pages. Explain a concept clearly and then immediately follow up with a fun activity.
+- **Method:** Teach through interactive challenges and simple stories based on the uploaded textbook pages.
 - **Curriculum:** You MUST base all your explanations, stories, and activities strictly on the concepts found in the uploaded images or text from the textbook.
-- **Interaction:** Start every new session by greeting the student with a fun learning game.
+- **Conciseness:** Keep replies very short (2-3 sentences). Use simple bullet points with emojis (like ✨ or 👉) instead of dense text.
+- **Engagement:** Always end every single message with a simple, fun question to keep the student engaged.
 
-**VERY IMPORTANT RESPONSE STYLE:**
-- **Keep it short!** Your replies must be very short and easy to read. Aim for only 2-3 sentences.
-- **No long paragraphs.** Use simple bullet points or lists with emojis (like ✨ or 👉) instead of dense text.
-- **One idea at a time.** Explain only one small thing in each message.
-- **Always ask a question.** End every single message with a simple, fun question to keep the student engaged.
+**CRITICAL: RESPONSE FORMAT**
+You MUST provide your answer in two parts, separated by the exact token "||SPEECH_BREAK||".
+
+1.  **display_text:** This is the visual response for the student.
+    - It MUST use LaTeX enclosed in single dollar signs (`$`) for all math (e.g., `$2 + 2 = 4$`).
+    - **VERY IMPORTANT:** After writing a LaTeX expression like `$\frac{4}{6}$`, DO NOT add any extra plain-text numbers like `6 4` or `4/6`. The model must ONLY output the pure LaTeX.
+    - **Bad display_text:** `Here is $\frac{4}{6} 6 4`
+    - **Good display_text:** `Here is $\frac{4}{6}`
+    - Use markdown for formatting and underscores (`____`) for "fill-in-the-blank" questions.
+
+2.  **speech_text:** This is the text for the audio engine. It MUST be 100% clean, spelled-out, and ready for Text-to-Speech.
+    - All LaTeX (like `$\frac{1}{2}$`) must be converted to plain words (e.g., "one-half").
+    - All math (like `$2 + 2 = 4$`) must be plain words (e.g., "2 plus 2 equals 4").
+    - All "fill-in-the-blank" lines (`____`) must be replaced with the word "blank".
+    - All parenthesized list items like (i), (ii), (v) must be spelled out (e.g., "roman numeral 1", "roman numeral 2", "roman numeral 5").
+    - Do not include any asterisks, markdown, or emojis.
+
+**EXAMPLE 1 (Math):**
+display_text: You got it! ✨ $2 + 2 = 4$. Now, what is $3 + 1$?
+||SPEECH_BREAK||
+speech_text: You got it! 2 plus 2 equals 4. Now, what is 3 plus 1?
+
+**EXAMPLE 2 (List):**
+display_text: Let's do activity (ii)!
+||SPEECH_BREAK||
+speech_text: Let's do activity roman numeral 2!
 """
 
 
@@ -417,7 +498,7 @@ def clear_all_state():
 
 
 # --- PHASE 2 MODIFICATION: START ---
-# This function is now upgraded to send a multimodal prompt
+# --- UPDATED handle_prompt function ---
 def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang_code, subject, language_key):
     try:
         # Assistant's response container
@@ -460,20 +541,35 @@ def handle_prompt(prompt, model, api_key, lesson_context, persona_text, tts_lang
                     response = st.session_state.chat_session.send_message(initial_prompt_parts)
                 
                 else:
-                    # *** THIS IS THE FIX ***
                     # SUBSEQUENT TURNS: Only send the new prompt. 
-                    # The model remembers the persona and extracted text from the first turn.
                     response = st.session_state.chat_session.send_message(prompt)
                     
-            response_text = response.text.replace('\f', '\\').replace('\\rac', '\\frac')
+            raw_response_text = response.text.replace('\f', '\\').replace('\\rac', '\\frac')
 
-            st.markdown(response_text)
-            st.session_state.messages.append({"role": "assistant", "content": response_text})
+            # --- NEW: Parse the dual output ---
+            if "||SPEECH_BREAK||" in raw_response_text:
+                parts = raw_response_text.split("||SPEECH_BREAK||", 1)
+                display_text = parts[0].replace("display_text:", "").strip()
+                speech_text = parts[1].replace("speech_text:", "").strip()
+                
+                # Handle empty speech_text just in case
+                if not speech_text.strip():
+                    speech_text = sanitize_text_for_speech(display_text)
+                    
+            else:
+                # FALLBACK: If the model forgets the format, use the old method
+                st.warning("Model response format error. Using fallback sanitizer.", icon="⚠️")
+                display_text = raw_response_text
+                speech_text = sanitize_text_for_speech(display_text)
+            # --- END NEW ---
+
+            # 1. Show the pretty visual text to the user
+            st.markdown(display_text)
+            st.session_state.messages.append({"role": "assistant", "content": display_text})
             scroll_chat_to_latest(delay_ms=80)
 
-        # Generate and play the audio for the response
-        speech_friendly_text = sanitize_text_for_speech(response_text)
-        sentences = nltk.sent_tokenize(speech_friendly_text)
+        # 2. Generate and play the audio using the CLEAN speech text
+        sentences = nltk.sent_tokenize(speech_text)
         if not sentences:
             return
 
